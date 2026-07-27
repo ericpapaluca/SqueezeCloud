@@ -20,7 +20,7 @@ use LWP::Simple;
 use LWP::UserAgent;
 use HTML::Parser;
 use URI::Escape;
-use JSON::XS::VersionOneAndTwo;
+use JSON::XS qw(decode_json);
 use XML::Simple;
 
 use Slim::Utils::Log;
@@ -82,7 +82,7 @@ sub getStreamURL {
 
 	# Need to call the /streams endpoint for the tracks API endpoint. This returns an object with the different stream options
 	my $res = $ua->get($queryUrl, Plugins::SqueezeCloud::Oauth2::getAuthenticationHeaders() );
-	my $stream_res = eval { from_json( $res->content ) };
+	my $stream_res = eval { decode_json( $res->content ) };
 
 	# Define the different formats supported in order of preference
 	foreach ('hls_aac_160_url', 'hls_aac_96_url', 'hls_mp3_128_url', 'http_mp3_128_url') {
@@ -159,7 +159,7 @@ sub gotNextTrack {
 	my $url    = $song->currentTrack()->url;
 	$log->debug('gotNextTrack started.');
 
-	my $track  = eval { from_json( $http->content ) };
+	my $track  = eval { decode_json( $http->content ) };
 
 	if ( $@ || $track->{error} ) {
 

@@ -18,7 +18,7 @@ use Slim::Utils::Prefs;
 use Slim::Utils::Log;
 use Slim::Utils::Cache;
 
-use JSON::XS::VersionOneAndTwo;
+use JSON::XS qw(decode_json);
 
 my $log   = logger('plugin.squeezecloud');
 my $prefs = preferences('plugin.squeezecloud');
@@ -62,7 +62,7 @@ sub handler {
 			sub {
 				$log->debug('Successful request for user info.');
 				my $response = shift;
-				my $result = eval { from_json($response->content) };
+				my $result = eval { decode_json($response->content) };
 				$log->info('You are logged in to SoundCloud as ' . $result->{username});
 				$params->{username} = $result->{username};
 
