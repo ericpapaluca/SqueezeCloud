@@ -14,7 +14,7 @@ use Slim::Utils::Prefs;
 use Slim::Utils::Log;
 use Slim::Utils::Cache;
 use Slim::Utils::Strings qw(string cstring);
-use JSON::XS::VersionOneAndTwo;
+use JSON::XS qw(decode_json);
 use Digest::SHA qw(sha256_base64);
 
 my $log   = logger('plugin.squeezecloud');
@@ -88,7 +88,7 @@ sub getAuthorizationToken {
 		sub {
 			$log->debug('Successful request for authorization_code.');
 			my $response = shift;
-			my $result = eval { from_json($response->content) };
+			my $result = eval { decode_json($response->content) };
 
 			$cache->set('access_token', $result->{access_token}, $result->{expires_in} - 60);
 			$prefs->set('refresh_token', $result->{refresh_token});
@@ -100,7 +100,7 @@ sub getAuthorizationToken {
 			$log->error($_[1]);
 
 			my $response = shift;
-			my $result = eval { from_json($response->content) };
+			my $result = eval { decode_json($response->content) };
 			$log->error($result);
 		},
 		{
@@ -141,7 +141,7 @@ sub getAccessTokenWithRefreshToken {
 		sub {
 			$log->debug('Successful request for refresh_token');
 			my $response = shift;
-			my $result = eval { from_json($response->content) };
+			my $result = eval { decode_json($response->content) };
 			$cache->set('access_token', $result->{access_token}, $result->{expires_in} - 60);
 			$prefs->set('refresh_token', $result->{refresh_token});
 			$cb->(@params) if $cb;

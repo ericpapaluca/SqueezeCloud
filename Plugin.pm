@@ -19,7 +19,7 @@ use Encode;
 use vars qw(@ISA);
 
 use URI::Escape;
-use JSON::XS::VersionOneAndTwo;
+use JSON::XS qw(decode_json);
 use LWP::UserAgent;
 use File::Spec::Functions qw(:ALL);
 use List::Util qw(min max);
@@ -414,7 +414,7 @@ sub _gotMetadata {
 
 	$client->master->pluginData( webapifetchingMeta => 0 );
 
-	my $json = eval { from_json($content) };
+	my $json = eval { decode_json($content) };
 	my $user_name = $json->{'user'}->{'username'};
 
 	# _gotMetadata is only called from ProtocolHandler and cannot handle track items.
@@ -599,7 +599,7 @@ sub _getTracks {
 		# Called when a response has been received for the request.
 		sub {
 			my $http = shift;
-			my $json = eval { from_json($http->content) };
+			my $json = eval { decode_json($http->content) };
 			my $next_href = $json->{'next_href'} || '';
 			my $returnedMenu = [];
 
@@ -719,7 +719,7 @@ sub urlHandler {
 		Slim::Networking::SimpleAsyncHTTP->new(
 			sub {
 				my $http = shift;
-				my $json = eval { from_json($http->content) };
+				my $json = eval { decode_json($http->content) };
 
 				if (exists $json->{'tracks'}) {
 					$callback->({ items => [ _parsePlaylist($json) ] });
