@@ -266,13 +266,16 @@ sub _trackDurationMs {
 }
 
 # Mark Go+ (high-tier subscription) tracks in listings so the user can tell them
-# apart. These only play in full when a Go+ token is configured.
+# apart. These only play in full when a Go+ token is configured. v1 listings
+# signal them with access=blocked; the api-v2 fields (SUB_HIGH_TIER/SNIP) are
+# also checked in case the metadata came from the api-v2 path.
 sub _decorateTitle {
 	my ( $json ) = @_;
 	my $title = defined $json->{'title'} ? $json->{'title'} : '';
 	my $monet  = $json->{'monetization_model'} || '';
 	my $policy = $json->{'policy'} || '';
-	if ($monet eq 'SUB_HIGH_TIER' || $policy eq 'SNIP') {
+	my $access = $json->{'access'} || '';
+	if ($monet eq 'SUB_HIGH_TIER' || $policy eq 'SNIP' || $access eq 'blocked') {
 		$title .= ' [Go+]';
 	}
 	return $title;
@@ -553,24 +556,37 @@ sub fetchMetadata {
 	$log->debug('fetchMetadata ended.');
 }
 
+# Access param for v1 track listings. Go+ / subscription tracks come back from
+# the v1 API with access=blocked, and the API omits them from results unless
+# "blocked" is included in the access filter. We only ask for them when a Go+
+# token is configured, because without one they resolve to a 30-second preview.
+sub _accessParam {
+	return Plugins::SqueezeCloud::Oauth2::hasGoPlusToken()
+		? 'playable,preview,blocked'
+		: 'playable,preview';
+}
+
 # Decide whether a track from a v1 listing should be shown.
 #
-# The v1 API marks Go+ (high-tier subscription) tracks as not streamable for
-# third-party apps, so the historic `streamable` filter hides them entirely. But
-# those tracks CAN be played in full through the api-v2 browser flow when a Go+
-# token is configured, so in that case we expose them too. Without a token they
-# would only resolve to a 30-second preview, so we keep hiding them by default.
+# The v1 API returns Go+ (high-tier subscription) tracks with access=blocked (and
+# streamable=true, so the historic streamable-only filter would let them through
+# even though a third-party app cannot stream them directly). Those tracks CAN be
+# played in full through the api-v2 browser flow when a Go+ token is configured,
+# so we expose them only in that case; without a token they would only ever
+# resolve to a 30-second preview, so we keep hiding them.
+#
+# Note: v1 does NOT populate policy/monetization_model (they come back null), so
+# access is the only signal available here — the SUB_HIGH_TIER/SNIP fields only
+# exist on the api-v2 track object, not on v1 listings.
 sub _isTrackExposable {
 	my $entry = shift;
 
-	return 1 if $entry->{'streamable'};
-
-	my $monet  = $entry->{'monetization_model'} || '';
-	my $policy = $entry->{'policy'} || '';
 	my $access = $entry->{'access'} || '';
-	my $looksGoPlus = ($monet eq 'SUB_HIGH_TIER' || $policy eq 'SNIP' || $access eq 'preview');
+	if ($access eq 'blocked') {
+		return Plugins::SqueezeCloud::Oauth2::hasGoPlusToken() ? 1 : 0;
+	}
 
-	return ($looksGoPlus && Plugins::SqueezeCloud::Oauth2::hasGoPlusToken()) ? 1 : 0;
+	return $entry->{'streamable'} ? 1 : 0;
 }
 
 # Log the streaming-eligibility fields of a track and whether we kept it, so the
@@ -633,7 +649,7 @@ sub tracksHandler {
 	my $uid = $passDict->{'uid'} || '';
 	my $pid = $passDict->{'pid'} || '';
 
-	my $extras = 'access=playable,preview&linked_partitioning=true&limit=' . $pageSize;
+	my $extras = 'access=' . _accessParam() . '&linked_partitioning=true&limit=' . $pageSize;
 	my $resource;
 
 	# Check the given type (defined by the passthrough array). Depending
@@ -696,7 +712,7 @@ sub tracksHandler {
 		# $params .= "&filter=streamable";
 		# access parameter only works with a search input
 		if ( $args->{'search'} ) {
-			$params .= "&access=playable,preview";
+			$params .= "&access=" . _accessParam();
 		}
 	}
 	

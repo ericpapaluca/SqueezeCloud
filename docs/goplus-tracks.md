@@ -3,74 +3,98 @@
 Notes from investigating why Go+ (high-tier subscription) tracks don't show up in
 browse/search, and what it takes to expose and play them.
 
-## What a Go+ track looks like
+## The short version
 
-Querying api-v2 anonymously (web `client_id` only) for a mainstream artist returns
-a mix of monetization models. A Go+ track is identifiable by:
+Go+ tracks were missing from search for one reason: the v1 search request asked
+for `access=playable,preview`, which **excludes** the subscription catalogue. Add
+`blocked` to that filter and the official tracks come back — already
+`streamable: true`, with the correct full duration. Playback then resolves them in
+full via the api-v2 browser flow when a Go+ token is configured.
 
-| field                 | Go+ track          | normal track            |
-|-----------------------|--------------------|-------------------------|
-| `monetization_model`  | `SUB_HIGH_TIER`    | `AD_SUPPORTED` / `BLACKBOX` |
-| `policy`              | `SNIP`             | `MONETIZE`              |
-| `streamable` (api-v2) | `true`             | `true`                  |
+## What a Go+ track looks like — v1 vs api-v2
 
-Example (`Aston Martin Music (feat. Drake …)`, id `278008021`), fetched
-**anonymously**:
+The two APIs describe the same track very differently. This matters because
+browse/search uses **v1** (`api.soundcloud.com`) while stream resolution uses
+**api-v2** (`api-v2.soundcloud.com`).
 
-* `duration: 30000` ms but `full_duration: 270655` ms — a 30-second snippet.
-* `media.transcodings`: only `mp3_0_1` (`sq`), every one flagged `snipped: true`.
-  No `aac_160k`, no `aac_256k`.
+Example: the official "Shake It Off" by the verified Taylor Swift account,
+track id `294363326`.
 
-So without authentication a Go+ track resolves to a **30-second MP3 preview**. Only
-an authenticated Go+ session (the browser web-session token) returns `policy:
-ALLOW`, the full duration, and the `aac_256k` transcoding.
+| field                | v1 (registered-app token) | api-v2 (anonymous)      |
+|----------------------|---------------------------|-------------------------|
+| `streamable`         | `true`                    | `true`                  |
+| `access`             | **`blocked`**             | — (not present)         |
+| `policy`             | `null`                    | `SNIP`                  |
+| `monetization_model` | `null`                    | `SUB_HIGH_TIER`         |
+| `duration`           | `219246` (full 3:39)      | `30000` (30s snippet)   |
+| `full_duration`      | `null`                    | `219246`                |
 
-## Why they don't appear today
+Key takeaways, all verified live against the user's own account token:
 
-Browsing/search goes through the **v1** API (`api.soundcloud.com`), and the v1 API
-marks Go+ tracks as **not streamable** for third-party apps. Both list parsers drop
-every non-streamable track:
+* **v1 does NOT return `policy` or `monetization_model`** — they are `null`. The
+  only usable signal on a v1 listing is `access`: `playable` (normal),
+  `preview` (30s preview track), or **`blocked`** (Go+ / subscription).
+* A Go+ track is `streamable: true` in v1, so a streamable-only filter would keep
+  it. It was never the `streamable` check that hid these tracks.
+* v1 reports the **full** duration for a blocked track (not a 30s snippet), so the
+  browse/now-playing duration is already correct — no special handling needed.
+* Anonymously, api-v2 returns only a 30-second snippet (`policy: SNIP`). The full
+  track and the `aac_256k` transcoding require an authenticated Go+ web-session
+  token.
 
-```perl
-for my $entry (@{$json->{'collection'}}) {
-    if ($entry->{'streamable'}) { push @$menuEntries, _makeMetadata(...); }
-}
-```
+## Why they didn't appear
 
-So Go+ tracks are filtered out before they ever reach a menu. (v1 is requested with
-`access=playable,preview`, so the API *does* return them as previews; the
-client-side `streamable` check is what hides them.)
+The v1 search endpoint **omits `access=blocked` tracks unless `blocked` is included
+in the `access` query parameter**. The plugin requested `access=playable,preview`,
+so the subscription catalogue never came back — the tracks that *did* appear for a
+query like "taylor swift shake it off" were all fan reuploads and covers
+(`access: playable`).
 
-> The exact v1 field values for a Go+ track could not be observed offline — v1
-> rejects the web `client_id` (403) and needs the registered-app token. The debug
-> logging added in this branch (`_logTrackEligibility`) prints
-> `streamable/access/policy/monetization_model` for every track so this can be
-> confirmed on a live server.
+This was confirmed by re-running the same v1 search with
+`access=playable,preview,blocked`: the verified-artist tracks (`294363326`,
+`1650401874`) then appeared, `streamable: true`, `access: blocked`.
 
-## The duration trap
-
-Even once a Go+ track is exposed and resolved via api-v2, the v1 metadata used to
-build the menu reports the **30-second snippet** duration (the registered-app token
-is not a Go+ session). If we trust it, the player stops at 0:30. So the api-v2
-resolver now stashes the authenticated `full_duration` on the track and in the
-cache, and the metadata builder prefers it.
+> An earlier revision of this branch assumed browse returned Go+ tracks but marked
+> them non-streamable, and filtered on `SUB_HIGH_TIER` / `SNIP`. That was wrong on
+> both counts: the tracks are streamable in v1, those fields don't exist on v1
+> listings, and the tracks were simply excluded by the `access` filter.
 
 ## Change in this branch (`feature/expose-goplus-tracks`)
 
 * `Oauth2::hasGoPlusToken()` — is a Go+ token configured?
-* `Plugin::_isTrackExposable()` — keep a track if `streamable`, **or** if it looks
-  like a Go+ track (`SUB_HIGH_TIER` / `SNIP` / `preview`) **and** a Go+ token is
-  set. Without a token, Go+ tracks stay hidden (they'd only preview).
-* `Plugin::_logTrackEligibility()` — debug log of the eligibility fields + verdict.
-* Duration: `_trackDurationMs()` prefers the api-v2 `full_duration`
-  (stashed as `sc_duration_ms` / cached as `duration:<id>`) over the v1 snippet;
-  `_formatDuration()` uses it too.
-* `_decorateTitle()` — appends ` [Go+]` so Go+ tracks are identifiable in lists.
+* `Plugin::_accessParam()` — returns `playable,preview,blocked` when a Go+ token is
+  configured, else `playable,preview`. Used for every v1 track listing/search. We
+  only ask for `blocked` tracks when we can actually play them in full; without a
+  token they'd resolve to a 30-second preview.
+* `Plugin::_isTrackExposable()` — keys on `access`: a `blocked` track is shown only
+  when a Go+ token is set; otherwise the normal `streamable` rule applies.
+* `Plugin::_logTrackEligibility()` — debug log of `streamable/access/policy/
+  monetization_model` + verdict, for diagnosing on a live server.
+* `_decorateTitle()` — appends ` [Go+]` when a track is `access: blocked` (v1) or
+  `SUB_HIGH_TIER`/`SNIP` (api-v2), so Go+ tracks are identifiable in lists.
+* Duration: `_trackDurationMs()` still prefers the authenticated `full_duration`
+  stashed by the api-v2 resolver, but v1 already reports the full duration for
+  blocked tracks, so the previous "cut off at 0:30" risk does not arise from v1
+  metadata.
 
-## Open questions / to verify live
+## Verified live (2026-08-19)
 
-1. Confirm the v1 `streamable`/`access`/`policy` values for a Go+ track from the
-   debug log (do they match the api-v2 values above?).
-2. Confirm a Go+ track now (a) appears in search, (b) plays full-length at
-   `aac_256k`, (c) shows the correct duration, not 0:30.
-3. Non-Go+ behaviour unchanged (Go+ tracks remain hidden without a token).
+Against the user's own registered-app token:
+
+1. v1 `GET /tracks?q=…&access=playable,preview` → only covers/reuploads
+   (`access: playable`); the official tracks are absent.
+2. v1 `GET /tracks?q=…&access=playable,preview,blocked` → official tracks appear
+   (`access: blocked`, `streamable: true`, full duration).
+3. v1 `GET /tracks/294363326` directly → HTTP 200, `access: blocked`,
+   `duration: 219246`, `policy`/`monetization_model` null.
+4. api-v2 confirms the same id is `SUB_HIGH_TIER` / `SNIP`; with a Go+ token the
+   resolver returns the full track + `aac_256k` (per the HQ-migration work).
+
+## To verify on the user's LMS
+
+1. With a Go+ token set, search a mainstream artist and confirm the official
+   tracks now appear tagged `[Go+]`.
+2. Confirm one plays full-length at `aac_256k` (log: `Selected transcoding preset
+   aac_256k`) and shows the correct duration.
+3. Remove/blank the token and confirm Go+ tracks disappear again (back to
+   `playable,preview` only).
