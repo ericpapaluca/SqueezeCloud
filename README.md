@@ -1,10 +1,12 @@
 # A SoundCloud plugin for Lyrion music server #
 
 > **This is a fork of [danielvijge/SqueezeCloud](https://github.com/danielvijge/SqueezeCloud).**
-> It adds **high quality streaming** (AAC, up to 256kbps for SoundCloud Go+ accounts) by
-> resolving streams through the same api-v2 "browser" flow the SoundCloud web player uses,
-> instead of the standard-quality v1 endpoint. Everything else is unchanged, and all the
-> credit for the plugin belongs upstream — see [Acknowledgements](#acknowledgements) below.
+> It adds **AAC 256kbps streaming for SoundCloud Go+ subscribers** by resolving streams
+> through the same api-v2 "browser" flow the web player uses. The public API already serves
+> AAC 160kbps, so for non-Go+ accounts this fork matches upstream — the 256kbps tier is the
+> only thing api-v2 unlocks, and it needs a browser session token (see below). Everything
+> else is unchanged, and all the credit for the plugin belongs upstream — see
+> [Acknowledgements](#acknowledgements) below.
 
 This is a Lyrion Music Server (LMS) (a.k.a Squeezebox server) plugin to play tracks from SoundCloud.
 It uses `ffmpeg` to transcode the SoundCloud stream.
@@ -57,11 +59,15 @@ And on Red Hat Enterprise Linux (Fedora, CentOS, etc.) like this:
 ## High quality streaming ##
 
 The upstream plugin resolves streams through SoundCloud's public **v1** API
-(`api.soundcloud.com/tracks/{id}/streams`). For third-party applications that
-endpoint now only returns a standard-quality MP3 128kbps stream — the higher
-quality AAC tiers (including the 256kbps stream available to SoundCloud Go+
-subscribers) are only exposed through the **api-v2** "browser" flow that the
-SoundCloud web player itself uses.
+(`api.soundcloud.com/tracks/{id}/streams`), which already returns an AAC 160kbps
+HLS stream (`hls_aac_160_url`) alongside MP3 128 and Opus 64. So AAC 160 is the
+baseline, available with or without this fork.
+
+The one tier v1 never exposes is **AAC 256kbps**, the high quality stream
+available to SoundCloud **Go+** subscribers. That is only reachable through the
+**api-v2** "browser" flow the web player uses, and only when the request is
+authenticated as the Go+ user. Unlocking that tier is the sole reason this fork
+exists.
 
 This fork rewrites **only the stream resolution** step to replicate that browser
 flow:
@@ -77,11 +83,11 @@ This requires two extra credentials beyond the normal login:
   automatically from the SoundCloud website's JavaScript bundles and cached for a
   day. It is *not* the same as the registered-app client id, and it rotates from
   time to time (the plugin re-scrapes automatically if one is rejected).
-* An **OAuth token** (optional) — public tracks resolve anonymously (up to AAC
-  160kbps) with just the client id, so no token is required for a quality bump
-  over the old MP3 128kbps path. To unlock your own **AAC 256kbps (Go+)**
-  transcodings you must paste a browser-extracted web-session token (see below);
-  the registered-app token from the normal login is not accepted by api-v2.
+* An **OAuth token** — required for AAC 256kbps. Anonymous api-v2 requests (client
+  id only) top out at AAC 160kbps, the same as v1. To unlock your own **AAC
+  256kbps (Go+)** transcodings you must paste a browser-extracted web-session
+  token (see below); the registered-app token from the normal login is not
+  accepted by api-v2, so it is not sent.
 
 ### Settings ###
 
@@ -121,8 +127,8 @@ authors** — this fork would not exist without their prior work.
   favourites and the OAuth login flow all remain on the v1 API exactly as
   upstream, so the surface area for regressions is small.
 * **Anonymous by default, no new login step.** The plugin auto-scrapes the web
-  `client_id` and resolves streams anonymously, so a quality bump to AAC 160kbps
-  "just works" with no extra setup. AAC 256kbps (Go+) additionally needs a
+  `client_id` and resolves streams anonymously (AAC 160kbps — the same as v1, so
+  nothing regresses for non-Go+ users). AAC 256kbps (Go+) additionally needs a
   browser-extracted web-session token, pasted in Settings — the registered-app
   login token is deliberately not sent to api-v2 because it is rejected there.
 * **Highest quality by default, but configurable.** The default is the best
