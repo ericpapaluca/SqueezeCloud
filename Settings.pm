@@ -39,7 +39,9 @@ sub page {
 }
 
 sub prefs {
-	return (preferences('plugin.squeezecloud'));
+	# The extra names are auto-loaded/saved by the base Settings handler from the
+	# corresponding pref_* form fields on the settings page.
+	return (preferences('plugin.squeezecloud'), qw(streamQuality webClientId oauthToken));
 }
 
 sub handler {
