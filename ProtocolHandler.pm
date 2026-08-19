@@ -210,10 +210,22 @@ sub getStreamURL {
 		return getStreamURLv1($json);
 	}
 
+	# Log every offered transcoding (preset / protocol / snipped) so it is clear
+	# which formats are actually available and playable for a given track. Go+
+	# tracks typically only offer the full-length audio through a DRM-protected
+	# (encrypted) transcoding LMS cannot decode.
+	if ($log->is_debug) {
+		$log->debug('api-v2 transcodings offered: ' . join(', ', map {
+			($_->{'preset'} || '?')
+			. '/' . (($_->{'format'} && $_->{'format'}->{'protocol'}) || '?')
+			. ($_->{'snipped'} ? ' snipped' : '')
+		} @$transcodings));
+	}
+
 	# 2. Select the best transcoding for the configured quality preference.
 	my $chosen = _selectTranscoding($transcodings, $quality);
 	if (!$chosen) {
-		$log->warn('No suitable transcoding found, falling back to v1');
+		$log->warn('No playable (non-DRM) transcoding found, falling back to v1');
 		return getStreamURLv1($json);
 	}
 	my $protocol = ($chosen->{'format'} && $chosen->{'format'}->{'protocol'}) || 'unknown';
@@ -287,12 +299,26 @@ sub _presetQuality {
 	return ('', '');
 }
 
+# True if a transcoding is DRM/encrypted (e.g. protocol "cbc-encrypted-hls").
+# SoundCloud serves the Go+ high quality (aac_256k) as a FairPlay-encrypted
+# SAMPLE-AES HLS stream (EXT-X-KEY METHOD=SAMPLE-AES, com.apple.streamingkeydelivery).
+# LMS/ffmpeg have no FairPlay license client, so such a stream resolves to a URL
+# but produces no audio. We must never hand one to the player.
+sub _isEncryptedTranscoding {
+	my $t = shift;
+	my $protocol = ($t->{'format'} && $t->{'format'}->{'protocol'}) || '';
+	return $protocol =~ /encrypt/i ? 1 : 0;
+}
+
 # Pick the best available transcoding for the configured quality preference.
+# Encrypted (DRM) transcodings are skipped because they cannot be played, even
+# though they are usually the highest quality option offered.
 sub _selectTranscoding {
 	my ($transcodings, $quality) = @_;
 
 	foreach my $token (_presetPreference($quality)) {
 		foreach my $t (@$transcodings) {
+			next if _isEncryptedTranscoding($t);
 			my $preset = $t->{'preset'} || '';
 			# The preference token is matched as a prefix of the preset name, so
 			# e.g. "aac" matches "aac_160k"/"aac_256k" and "aac_256" matches only
