@@ -222,6 +222,17 @@ sub getStreamURL {
 		} @$transcodings));
 	}
 
+	# Go+ tracks only: grab the Widevine PSSH from the ctr-encrypted-hls
+	# transcoding and hand the base64 straight to tools/pssh_inspect.py (no file).
+	# Runs during normal playback (not gated on debug), but only once per track
+	# (guarded by the 'pssh:' cache flag) so replays don't re-spawn Python. Wrapped
+	# in eval so it can never break stream resolution; its result is never handed
+	# to the player.
+	if (_isGoPlusTrack($json, $track) && !$cache->get('pssh:' . $trackId)) {
+		eval { _diagnoseWidevine($ua, $transcodings, $clientId, $trackAuth, $trackId, $client); 1 }
+			or $log->warn('Widevine diagnostic failed: ' . $@);
+	}
+
 	# 2. Select the best transcoding for the configured quality preference.
 	my $chosen = _selectTranscoding($transcodings, $quality);
 	if (!$chosen) {
@@ -327,6 +338,148 @@ sub _selectTranscoding {
 		}
 	}
 
+	return;
+}
+
+# Is this a Go+ (subscription / high-tier) track? v1 marks these access:blocked;
+# api-v2 reports monetization_model SUB_HIGH_TIER (or policy SNIP anonymously).
+sub _isGoPlusTrack {
+	my ($json, $track) = @_;
+	return 1 if $json  && ($json->{'access'} || '') eq 'blocked';
+	return 1 if $track && ($track->{'monetization_model'} || '') eq 'SUB_HIGH_TIER';
+	return 1 if $track && ($track->{'policy'} || '') eq 'SNIP';
+	return 0;
+}
+
+# Diagnostic helper (Go+ tracks only). Widevine is carried in the
+# ctr-encrypted-hls transcoding; its PSSH is identical across presets (one key
+# per track), so we resolve just the first ctr tier, extract the Widevine PSSH,
+# and hand the base64 straight to tools/pssh_inspect.py (no file). Purely
+# informational — nothing here feeds playback.
+sub _diagnoseWidevine {
+	my ($ua, $transcodings, $clientId, $trackAuth, $trackId, $client) = @_;
+
+	my ($ctr) = grep {
+		((($_->{'format'} && $_->{'format'}->{'protocol'}) || '') =~ /^ctr-encrypted/i)
+	} @$transcodings;
+	if (!$ctr) {
+		$log->debug('Widevine diagnostic: no ctr-encrypted-hls transcoding offered');
+		return;
+	}
+
+	my $preset   = $ctr->{'preset'} || '?';
+	my $mediaUrl = $ctr->{'url'} or return;
+	my $sep = ($mediaUrl =~ /\?/) ? '&' : '?';
+	my $sigUrl = $mediaUrl . $sep . 'client_id=' . $clientId;
+	$sigUrl .= '&track_authorization=' . $trackAuth if $trackAuth;
+
+	my $res = _apiV2Get($ua, $sigUrl, $client);
+	if (!$res->is_success) {
+		$log->debug('Widevine diagnostic: media endpoint ' . $res->status_line);
+		return;
+	}
+
+	my $stream  = eval { decode_json($res->content) };
+	my $m3u8Url = $stream && ref($stream) eq 'HASH' ? $stream->{'url'} : undef;
+	return unless $m3u8Url;
+
+	my $m3res = $ua->get($m3u8Url);
+	if (!$m3res->is_success) {
+		$log->debug('Widevine diagnostic: manifest fetch ' . $m3res->status_line);
+		return;
+	}
+	my $m3u8 = $m3res->content;
+
+	my $drm = _detectDrmSystem($m3u8);
+	$log->debug("Widevine diagnostic: $preset/ctr-encrypted-hls -> " . ($drm || 'no DRM key found'));
+
+	my $psshB64 = _widevinePssh($m3u8);
+	if (!$psshB64) {
+		$log->debug('Widevine diagnostic: no Widevine PSSH found in manifest');
+		return;
+	}
+	$log->debug("Widevine diagnostic: PSSH (b64) = $psshB64");
+
+	# Hand the PSSH string straight to the Python inspector as an argument — no
+	# file is written or read.
+	$log->info("Widevine PSSH captured for track $trackId ($preset)");
+	_runPsshInspector($psshB64);
+
+	# Only grab once per track; replays within the cache window skip the work.
+	$cache->set('pssh:' . $trackId, 1, QUALITY_CACHE_TTL);
+}
+
+# Run tools/pssh_inspect.py on a PSSH base64 string and log its output. The PSSH
+# is passed as a --b64 argument (no file), best-effort, and invoked without a
+# shell (list-form open) so the base64 is passed literally as one argv element
+# and can't be misinterpreted. The Python interpreter defaults to "python3" but
+# can be overridden with the pythonPath plugin pref.
+sub _runPsshInspector {
+	my $psshB64 = shift or return;
+
+	my $mod = $INC{'Plugins/SqueezeCloud/ProtocolHandler.pm'};
+	return unless $mod;
+	(my $dir = $mod) =~ s{[/\\][^/\\]+$}{};
+	my $script = "$dir/tools/pssh_inspect.py";
+	if (! -f $script) {
+		$log->warn("Widevine diagnostic: inspector not found at $script");
+		return;
+	}
+
+	my $python = $prefs->get('pythonPath') || 'python3';
+	$log->info("Widevine diagnostic: running $python $script --b64 <pssh>");
+
+	my $out;
+	if (open(my $ph, '-|', $python, $script, '--b64', $psshB64)) {
+		local $/;
+		$out = <$ph>;
+		close $ph;
+	}
+	else {
+		$log->warn("Widevine diagnostic: could not run $python: $!");
+		return;
+	}
+
+	$out = '' unless defined $out;
+	for my $line (split /\n/, $out) {
+		$log->info("pssh_inspect: $line");
+	}
+}
+
+# Inspect an HLS manifest and return a comma-separated list of the DRM systems it
+# declares, based on its EXT-X-KEY / EXT-X-SESSION-KEY tags. Recognises Apple
+# FairPlay, Microsoft PlayReady, Widevine (by system UUID) and plain clear-key
+# AES-128. Returns '' when no key tag is present (i.e. an unencrypted manifest).
+sub _detectDrmSystem {
+	my $m3u8 = shift || '';
+	my %sys;
+	for my $line (split /\r?\n/, $m3u8) {
+		next unless $line =~ /^#EXT-X-(?:SESSION-)?KEY/;
+		$sys{'FairPlay'}        = 1 if $line =~ /com\.apple\.streamingkeydelivery/i;
+		$sys{'PlayReady'}       = 1 if $line =~ /com\.microsoft\.playready/i
+		                            || $line =~ /9a04f079-9840-4286-ab92-e65be0885f95/i;
+		$sys{'Widevine'}        = 1 if $line =~ /edef8ba9-79d6-4ace-a3c8-27dcd51d21ed/i;
+		$sys{'ClearKey-AES128'} = 1 if $line =~ /METHOD=AES-128/i;
+	}
+	return join(', ', sort keys %sys);
+}
+
+# Extract the Widevine PSSH (base64) from an HLS manifest, or undef if none.
+# The Widevine EXT-X-KEY line looks like:
+#   #EXT-X-KEY:METHOD=SAMPLE-AES-CTR,URI="data:text/plain;base64,<PSSH>",
+#             KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed",...
+# The URI's base64 payload IS the PSSH box; we return just that base64 string
+# (any leading "data:...;base64," prefix stripped).
+sub _widevinePssh {
+	my $m3u8 = shift || '';
+	for my $line (split /\r?\n/, $m3u8) {
+		next unless $line =~ /^#EXT-X-(?:SESSION-)?KEY/;
+		next unless $line =~ /edef8ba9-79d6-4ace-a3c8-27dcd51d21ed/i;
+		next unless $line =~ /URI="([^"]+)"/i;
+		my $uri = $1;
+		$uri =~ s/^data:[^,]*,//i;   # drop any data URI prefix, keep the base64
+		return $uri;
+	}
 	return;
 }
 
