@@ -546,6 +546,52 @@ sub getBetterArtworkURL {
 
 sub getFormatForURL { 'soundcloud' } # custom-convert type
 
+# TEACHING EXAMPLE — conditional convert routing.
+# Choose which custom-convert.conf source format a track should use. Go+
+# (subscription) tracks get the distinct tag 'sc_goplus' so they match a
+# different ffmpeg rule; everything else keeps the normal 'soundcloud' rule.
+# This is purely a routing demonstration: the sc_goplus rule only adds a benign
+# -metadata tag to the ffmpeg command — it does NOT decrypt anything.
+#
+# Perl notes:
+#   * shift with no argument pulls the first element off @_ (the arg list).
+#   * ref($x) eq 'HASH' tests that $x is a hash reference before we poke at it,
+#     guarding against undef/other types (defensive, avoids runtime errors).
+#   * the final line is a ternary: COND ? THEN : ELSE — its value is returned
+#     because it is the last expression evaluated in the sub.
+sub _formatForTrack {
+	my $track = shift;
+
+	# TEACHING EXAMPLE (benign): if a demo volume gain is configured, route ALL
+	# tracks through the wrapper-script rules (sc_demo) so you can trace a
+	# per-track value travelling plugin -> URL fragment -> wrapper -> ffmpeg.
+	# This takes precedence over the Go+ branch below purely to keep the demo
+	# easy to trigger. Default pref is 0, so normal installs never hit this.
+	return 'sc_demo' if $prefs->get('demoGainDb');
+
+	return 'soundcloud' unless ref($track) eq 'HASH';
+	return _isGoPlusTrack($track, $track) ? 'sc_goplus' : 'soundcloud';
+}
+
+# Append our private '#scgain=<db>' side-channel to a stream URL, so the
+# sc_demo wrapper (bin/scwrap.pl) can recover the value ffmpeg has no
+# placeholder for. Idempotent: replaces any existing scgain fragment rather
+# than stacking a second one on seek/refresh.
+#
+# Perl notes:
+#   * (my $copy = $orig) =~ s///  edits a COPY, leaving $orig untouched.
+#   * =~ /pattern/ in boolean context tests for a match.
+sub _appendGainFragment {
+	my ($url, $db) = @_;
+	return $url unless defined $url && length $url;
+
+	if ($url =~ /#/) {
+		# strip any prior fragment so we don't stack scgain= values
+		$url =~ s/#.*\z//s;
+	}
+	return $url . '#scgain=' . $db;
+}
+
 # When seeking, fetch the URL again. SoundCloud streams have an expiry time. Seeking
 # forward should not cause an issue, as the end of the song will always be before
 # the expiry time. But seeking backwards and then playing until the end could result
@@ -563,7 +609,24 @@ sub formatOverride {
 		$song->streamUrl($stream) if $stream;
 	}
 
-	return 'soundcloud';
+	# Route Go+ tracks to their own convert rule (see custom-convert.conf).
+	my $format = _formatForTrack($track);
+
+	# TEACHING EXAMPLE (benign): when routed to sc_demo, stash the configured
+	# volume gain on the stream URL as a '#scgain=<db>' fragment. bin/scwrap.pl
+	# reads it back and applies '-af volume=<db>dB'. Done AFTER streamUrl() is
+	# set above so we decorate the freshly-resolved URL.
+	if ($format eq 'sc_demo') {
+		my $db = $prefs->get('demoGainDb');
+		my $stream = $song->streamUrl();
+		if (defined $stream && length $stream) {
+			$song->streamUrl(_appendGainFragment($stream, $db));
+			$log->debug("sc_demo: tagged stream with #scgain=$db");
+		}
+	}
+
+	$log->debug('formatOverride chose format: ' . $format);
+	return $format;
 }
 
 sub isRemote { 1 }
@@ -729,9 +792,15 @@ sub canDirectStreamSong {
 	$log->debug('canDirectStreamSong started.');
 
 	# We need to check with the base class (HTTP) to see if we
-	# are synced or if the user has set mp3StreamingMethod
+	# are synced or if the user has set mp3StreamingMethod.
+	# Use the same per-track format decision as formatOverride so the
+	# direct-stream check and the transcode routing agree. Neither 'soundcloud'
+	# nor 'sc_goplus' is a natively playable format, so this still forces a
+	# transcode via custom-convert.conf either way.
+	my $format = _formatForTrack($song->pluginData());
+
 	$log->debug('canDirectStreamSong ended.');
-	return $class->SUPER::canDirectStream( $client, $song->streamUrl(), $class->getFormatForURL() );
+	return $class->SUPER::canDirectStream( $client, $song->streamUrl(), $format );
 }
 
 # If an audio stream fails, keep playing

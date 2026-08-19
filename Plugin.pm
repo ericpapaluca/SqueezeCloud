@@ -28,6 +28,7 @@ use POSIX qw(strftime);
 use Slim::Utils::Strings qw(string cstring);
 use Slim::Utils::Prefs;
 use Slim::Utils::Log;
+use Slim::Utils::PluginManager;
 use Plugins::SqueezeCloud::Oauth2;
 
 # Defines the timeout in seconds for a http request
@@ -93,6 +94,10 @@ $prefs->init({
 	# login token. Populate these only if automatic resolution fails.
 	webClientId => "",
 	oauthToken => "",
+	# TEACHING EXAMPLE (benign): a playback volume gain, in dB. When non-zero,
+	# tracks are routed to the 'sc_demo' convert rules, which call bin/scwrap.pl
+	# to apply '-af volume=<db>dB' in ffmpeg. 0 = disabled (normal routing).
+	demoGainDb => 0,
 });
 
 # This is called when squeezebox server loads the plugin.
@@ -135,7 +140,56 @@ sub initPlugin {
 		after => 'remotetitle'
 	));
 
+	# Rewrite the @PLUGINDIR@ token in the sc_demo convert rules to this
+	# plugin's real on-disk path (custom-convert.conf can't know its own
+	# absolute location). Benign teaching helper — wrapped so it can't break
+	# init if the file layout is unexpected.
+	eval { _fixupConvertPaths($class); 1 }
+		or $log->warn('convert-path fixup failed: ' . $@);
+
 	$log->debug('initPlugin ended.');
+}
+
+# Replace the '@PLUGINDIR@' placeholder in custom-convert.conf with the plugin's
+# absolute base directory, so the [perl] "@PLUGINDIR@/bin/scwrap.pl" rules point
+# at a real path. Rewrites the file in place, and only when the token is present
+# (so repeated inits are a no-op after the first rewrite).
+#
+# Perl notes:
+#   * Slim::Utils::PluginManager->dataForPlugin($class) returns a hashref of
+#     plugin metadata; {basedir} is the install directory.
+#   * catfile() (from File::Spec::Functions) joins path parts portably.
+#   * local $/ = undef ("slurp mode") makes <$fh> read the whole file at once.
+#   * index($s, $needle) == -1 means the substring is absent.
+sub _fixupConvertPaths {
+	my $class = shift;
+
+	my $data = Slim::Utils::PluginManager->dataForPlugin($class);
+	my $basedir = $data && $data->{'basedir'};
+	return unless $basedir;
+
+	my $conf = catfile($basedir, 'custom-convert.conf');
+	return unless -f $conf && -w $conf;
+
+	open(my $rfh, '<', $conf) or do {
+		$log->warn("could not read $conf: $!");
+		return;
+	};
+	my $content = do { local $/; <$rfh> };
+	close($rfh);
+
+	return if index($content, '@PLUGINDIR@') == -1;   # already resolved
+
+	$content =~ s/\@PLUGINDIR\@/$basedir/g;
+
+	open(my $wfh, '>', $conf) or do {
+		$log->warn("could not rewrite $conf: $!");
+		return;
+	};
+	print $wfh $content;
+	close($wfh);
+
+	$log->info("resolved \@PLUGINDIR\@ in custom-convert.conf to $basedir");
 }
 
 # Called when the plugin is stopped
