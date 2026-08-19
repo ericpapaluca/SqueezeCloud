@@ -47,6 +47,20 @@ sub prefs {
 sub handler {
 	my ($class, $client, $params, $callback, @args) = @_;
 
+	# Persist and re-expose our custom prefs up-front. This must happen before the
+	# asynchronous login flow below, which can return early (e.g. to refresh an
+	# expired access token) without ever reaching the base Settings handler that
+	# would otherwise save them — which is why the fields appeared to reset when
+	# the page was reopened.
+	if ($params->{saveSettings}) {
+		for my $name (qw(streamQuality webClientId oauthToken)) {
+			$prefs->set($name, $params->{'pref_' . $name}) if defined $params->{'pref_' . $name};
+		}
+	}
+	for my $name (qw(streamQuality webClientId oauthToken)) {
+		$params->{'pref_' . $name} = $prefs->get($name);
+	}
+
 	if ($params->{code} && $params->{code} ne '') {
 		$log->debug('Getting access token and refresh token from code');
 		Plugins::SqueezeCloud::Oauth2::getAuthorizationToken(\&handler, @_);

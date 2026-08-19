@@ -95,18 +95,48 @@ Under _Settings_ > _Advanced_ > _SoundCloud_ you will find:
 
 * **Stream quality** — `Highest available` (default), `AAC (high quality)`, or
   `MP3 (standard quality)`.
-* **Web client ID** (optional) — paste a browser-extracted client id to override
-  auto-scraping.
-* **OAuth token** (optional) — paste a browser-extracted web-session token to
-  authenticate as yourself, required to unlock AAC 256kbps (Go+) streams. In a
-  logged-in browser, open DevTools → Network, filter for `api-v2`, and copy the
-  `Authorization` header value (e.g. `OAuth 2-xxxxx…`) from any request.
+* **Web client ID** (optional, rarely needed) — the plugin scrapes this
+  automatically, so you should normally leave it blank. Only paste a value here if
+  auto-scraping ever fails (you would see `Could not obtain a web client_id` in
+  the log). It is *not* the same as the registered-app client id.
+* **OAuth token** (needed for AAC 256kbps only) — paste a browser-extracted
+  web-session token to authenticate as yourself and unlock your Go+ 256kbps
+  streams. See [Getting your Go+ OAuth token](#getting-your-go-oauth-token) below.
+  Leave blank if you are not a Go+ subscriber — streams resolve anonymously at AAC
+  160kbps either way.
 
 The now-playing track info reflects the codec and bitrate that were actually
 resolved, rather than a fixed value.
 
 If any part of the api-v2 flow fails, the plugin automatically falls back to the
 original v1 behaviour so playback keeps working.
+
+### Getting your Go+ OAuth token ###
+
+AAC 256kbps is only served to an authenticated Go+ session, so you need to copy
+the token your own browser uses. The token is tied to your login and **expires
+after a while** — when it does, playback silently drops back to AAC 160kbps and
+you simply repeat these steps to refresh it.
+
+1. In a desktop browser, log in to <https://soundcloud.com> with your Go+ account.
+2. Open the developer tools (**F12**, or right-click → *Inspect*) and select the
+   **Network** tab.
+3. In the Network filter box, type `api-v2` to narrow the list.
+4. Play any track (or just click around) so requests appear. Click any request to
+   `api-v2.soundcloud.com`.
+5. In the **Headers** panel, scroll to **Request Headers** and find the
+   **`Authorization`** entry. Its value looks like `OAuth 2-1234567-...`.
+6. Copy that whole value and paste it into the plugin's **OAuth token** field
+   (_Settings_ > _Advanced_ > _SoundCloud_). The leading `OAuth ` is optional — the
+   plugin accepts it with or without.
+7. Save. Play a track and confirm: with the plugin log set to *Info*
+   (_Settings_ > _Advanced_ > _Logging_ > `plugin.squeezecloud`) you should see
+   `Selected transcoding preset aac_256k`, and the now-playing info will read
+   *256kbps AAC*.
+
+Alternative: instead of the header, you can copy the `oauth_token` cookie value
+for `soundcloud.com` from the browser's Application/Storage tab — it is the same
+token.
 
 ## How this fork was built ##
 
