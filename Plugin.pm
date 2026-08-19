@@ -81,7 +81,19 @@ BEGIN {
 # Get the data related to this plugin and preset certain variables with
 # default values in case they are not set
 my $prefs = preferences('plugin.squeezecloud');
-$prefs->init({ refresh_token => "" });
+$prefs->init({
+	refresh_token => "",
+	# Stream quality preference for the api-v2 (browser) stream resolution:
+	#   'max' - highest available (AAC 256/160 for Go+ accounts, else best offered)
+	#   'aac' - prefer AAC, fall back to MP3
+	#   'mp3' - force standard MP3
+	streamQuality => "max",
+	# Optional manual overrides for the api-v2 browser flow. Normally left empty:
+	# the plugin scrapes a web client_id automatically and reuses the account
+	# login token. Populate these only if automatic resolution fails.
+	webClientId => "",
+	oauthToken => "",
+});
 
 # This is called when squeezebox server loads the plugin.
 # It is used to initialize variables and the like.
@@ -168,6 +180,8 @@ sub _makeMetadata {
 		$icon =~ s/-large/-t500x500/g;
 	}
 
+	my ($codec, $bitrate) = _trackQuality($json);
+
 	my $DATA = {
 		urn => $json->{'urn'},
 		duration => $json->{'duration'} / 1000,
@@ -178,9 +192,9 @@ sub _makeMetadata {
 		play => "soundcloud://" . $json->{'urn'},
 		#url  => $json->{'permalink_url'},
 		#link => "soundcloud://" . $json->{'urn'},
-		bitrate => '160kbps',
+		bitrate => $bitrate,
 		bpm => (int($json->{'bpm'}) > 0 ? int($json->{'bpm'}) : ''),
-		type => 'AAC (SoundCloud)',
+		type => ($codec ? $codec . ' (SoundCloud)' : 'SoundCloud'),
 		icon => $icon,
 		image => $icon,
 		cover => $icon,
@@ -238,6 +252,34 @@ sub _getArtist {
 	return $json->{'metadata_artist'} || $json->{'user'}->{'username'} || '';
 }
 
+# Returns the (codec, bitrate) of the stream for display in the track info.
+# Uses the actual resolved quality when known (set by the protocol handler when
+# a stream is resolved, either on the track object or in the shared cache keyed
+# by track id), otherwise falls back to a label based on the quality preference.
+sub _trackQuality {
+	my ( $json ) = @_;
+
+	if ($json->{'sc_codec'}) {
+		return ($json->{'sc_codec'}, $json->{'sc_bitrate'} || '');
+	}
+
+	my $id = $json->{'id'};
+	if ((!defined $id || $id eq '') && defined $json->{'urn'} && $json->{'urn'} =~ /(\d+)\s*$/) {
+		$id = $1;
+	}
+	if ($id) {
+		my $q = $cache->get('quality:' . $id);
+		if ($q && $q->{'codec'}) {
+			return ($q->{'codec'}, $q->{'bitrate'} || '');
+		}
+	}
+
+	# Not resolved yet: label based on the configured preference. AAC bitrate is
+	# left blank because it depends on the track and account (up to 256kbps).
+	my $pref = $prefs->get('streamQuality') || 'max';
+	return $pref eq 'mp3' ? ('MP3', '128kbps') : ('AAC', '');
+}
+
 sub _advancedMenuItems {
 	$log->debug('_advancedMenuItems started.');
 	my ( $client, $json, $fromMakeMetaData ) = @_;
@@ -283,15 +325,17 @@ sub _advancedMenuItems {
 			type => 'text',
 		} if $json->{'bpm'};
 
+		my ($codec, $bitrate) = _trackQuality($json);
+
 		push @$trackinfo, {
-			name => cstring($client, 'TYPE') . cstring($client, 'COLON') . ' AAC (SoundCloud)',
+			name => cstring($client, 'TYPE') . cstring($client, 'COLON') . ' ' . ($codec ? $codec . ' (SoundCloud)' : 'SoundCloud'),
 			type => 'text',
 		};
 
 		push @$trackinfo, {
-			name => cstring($client, 'BITRATE') . cstring($client, 'COLON') . ' 160' . cstring($client, 'KBPS'),
+			name => cstring($client, 'BITRATE') . cstring($client, 'COLON') . ' ' . $bitrate,
 			type => 'text',
-		};
+		} if $bitrate;
 	}
 
 	push @$trackinfo, {
@@ -420,9 +464,11 @@ sub _gotMetadata {
 	# _gotMetadata is only called from ProtocolHandler and cannot handle track items.
 	my $args = { params => {isProtocolHandler => 1}};
 
-	my $DATA = _makeMetadata($client, $json, $args );
-
+	# Resolve the stream first so the real codec/bitrate is recorded on $json and
+	# then persisted by _makeMetadata (which writes the track to the cache).
 	my $stream = Plugins::SqueezeCloud::ProtocolHandler::getStreamURL($json);
+
+	my $DATA = _makeMetadata($client, $json, $args );
 
 	$log->debug('_gotMetadata ended.');
 

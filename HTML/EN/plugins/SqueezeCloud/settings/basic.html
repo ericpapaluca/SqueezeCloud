@@ -36,6 +36,22 @@
 
 	[% END %]
 
+	[% WRAPPER setting title="PLUGIN_SQUEEZECLOUD_QUALITY" desc="PLUGIN_SQUEEZECLOUD_QUALITY_DESC" %]
+	<select name="pref_streamQuality">
+		<option value="max" [% IF pref_streamQuality == 'max' %]selected="selected"[% END %]>[% "PLUGIN_SQUEEZECLOUD_QUALITY_MAX" | string %]</option>
+		<option value="aac" [% IF pref_streamQuality == 'aac' %]selected="selected"[% END %]>[% "PLUGIN_SQUEEZECLOUD_QUALITY_AAC" | string %]</option>
+		<option value="mp3" [% IF pref_streamQuality == 'mp3' %]selected="selected"[% END %]>[% "PLUGIN_SQUEEZECLOUD_QUALITY_MP3" | string %]</option>
+	</select>
+	[% END %]
+
+	[% WRAPPER setting title="PLUGIN_SQUEEZECLOUD_WEB_CLIENT_ID" desc="PLUGIN_SQUEEZECLOUD_WEB_CLIENT_ID_DESC" %]
+	<input type="text" class="stdedit" name="pref_webClientId" size="40" value="[% pref_webClientId %]" />
+	[% END %]
+
+	[% WRAPPER setting title="PLUGIN_SQUEEZECLOUD_OAUTH_TOKEN" desc="PLUGIN_SQUEEZECLOUD_OAUTH_TOKEN_DESC" %]
+	<input type="text" class="stdedit" name="pref_oauthToken" size="60" value="[% pref_oauthToken %]" />
+	[% END %]
+
 	[% WRAPPER setting title="PLUGIN_SQUEEZECLOUD_NOTES" %]
 		[% "PLUGIN_SQUEEZECLOUD_PLAYING_INSTRUCTIONS" | string %]
 	[% END %]

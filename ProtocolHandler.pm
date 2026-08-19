@@ -44,6 +44,13 @@ use base 'Slim::Player::Protocols::HTTP';
 use constant HTTP_TIMEOUT => 15;
 use constant STREAM_CACHE_TTL => 30; # stream URLs are valid only for a short period
 
+# Base URL of the unofficial browser API used for high quality stream resolution
+use constant API_V2_BASE => 'https://api-v2.soundcloud.com';
+
+# How long to remember the resolved codec/bitrate of a track for display in the
+# track info. Matches the metadata cache lifetime in Plugin.pm.
+use constant QUALITY_CACHE_TTL => 86400 * 30;
+
 use IO::Socket::SSL;
 IO::Socket::SSL::set_defaults(
 	SSL_verify_mode => Net::SSLeay::VERIFY_NONE()
@@ -62,9 +69,195 @@ sub getSeekData {
 	return { timeOffset => $newtime };
 }
 
+# Perform an api-v2 GET request.
+#
+# api-v2 resolves public tracks with just the client_id in the query string. An
+# account token is only needed to unlock a user's own high quality (Go+)
+# transcodings, and a token api-v2 does not recognise (e.g. the registered-app
+# token from the normal login flow) is rejected outright with 401/403. So we send
+# the token when we have one, but if that is rejected we retry the request
+# anonymously before giving up, so public tracks still resolve.
+sub _apiV2Get {
+	my ($ua, $url) = @_;
+
+	my @authHeaders = Plugins::SqueezeCloud::Oauth2::getApiV2AuthenticationHeaders();
+	my $res = @authHeaders ? $ua->get($url, @authHeaders) : $ua->get($url);
+
+	if (!$res->is_success && @authHeaders && ($res->code == 401 || $res->code == 403)) {
+		$log->warn('api-v2 rejected the account token (' . $res->status_line . '), retrying anonymously');
+		$res = $ua->get($url);
+	}
+
+	return $res;
+}
+
+# Resolve a playable stream URL for a track.
+#
+# This replicates the SoundCloud web player ("browser") flow via the api-v2
+# endpoints, which is the only way to obtain the high quality (AAC / Go+)
+# transcodings. It fetches the track object to get its media.transcodings and a
+# per-track track_authorization, selects the best transcoding according to the
+# configured quality preference, then resolves the signed CDN URL from it.
+#
+# If anything in the api-v2 flow fails (no web client_id, unexpected response,
+# etc.) it falls back to the legacy v1 /streams behaviour so playback keeps
+# working.
 sub getStreamURL {
 	my $json = shift;
 	$log->debug('getStreamURL started.');
+
+	# Determine the numeric track id from the v1 metadata object. api-v2 uses the
+	# numeric id, not the "soundcloud:tracks:<id>" urn.
+	my $trackId = $json->{'id'};
+	if ((!defined $trackId || $trackId eq '') && defined $json->{'urn'} && $json->{'urn'} =~ /(\d+)\s*$/) {
+		$trackId = $1;
+	}
+
+	if (!$trackId) {
+		$log->warn('Could not determine numeric track id, falling back to v1 stream resolution');
+		return getStreamURLv1($json);
+	}
+
+	my $quality = $prefs->get('streamQuality') || 'max';
+	my $cacheKey = 'streamurl:' . $trackId . ':' . $quality;
+	my $cachedStreamUrl = $cache->get($cacheKey);
+	if ($cachedStreamUrl) {
+		$log->debug('Return stream URL from cache');
+		return $cachedStreamUrl;
+	}
+
+	my $clientId = Plugins::SqueezeCloud::Oauth2::getWebClientId();
+	if (!$clientId) {
+		$log->warn('No web client_id available, falling back to v1 stream resolution');
+		return getStreamURLv1($json);
+	}
+
+	my $ua = LWP::UserAgent->new( timeout => HTTP_TIMEOUT );
+
+	# 1. Fetch the api-v2 track object (transcodings + track_authorization).
+	my $trackUrl = API_V2_BASE . '/tracks/' . $trackId . '?client_id=' . $clientId;
+	$log->info('SoundCloud api-v2 call to ' . $trackUrl);
+	my $res = _apiV2Get($ua, $trackUrl);
+	if (!$res->is_success) {
+		$log->warn('api-v2 track fetch failed (' . $res->status_line . '), falling back to v1');
+		# Even the anonymous attempt failed, so a rotated/invalid client_id is the
+		# likely cause; drop it so the next attempt re-scrapes a fresh one.
+		Plugins::SqueezeCloud::Oauth2::clearWebClientId() if $res->code == 401 || $res->code == 403;
+		return getStreamURLv1($json);
+	}
+
+	my $track = eval { decode_json($res->content) };
+	if ($@ || !$track || ref($track) ne 'HASH') {
+		$log->warn('Could not decode api-v2 track response, falling back to v1');
+		return getStreamURLv1($json);
+	}
+
+	my $trackAuth = $track->{'track_authorization'};
+	my $transcodings = $track->{'media'} && $track->{'media'}->{'transcodings'};
+	if (!$transcodings || ref($transcodings) ne 'ARRAY' || !@$transcodings) {
+		$log->warn('No transcodings in api-v2 response, falling back to v1');
+		return getStreamURLv1($json);
+	}
+
+	# 2. Select the best transcoding for the configured quality preference.
+	my $chosen = _selectTranscoding($transcodings, $quality);
+	if (!$chosen) {
+		$log->warn('No suitable transcoding found, falling back to v1');
+		return getStreamURLv1($json);
+	}
+	my $protocol = ($chosen->{'format'} && $chosen->{'format'}->{'protocol'}) || 'unknown';
+	$log->info('Selected transcoding preset ' . ($chosen->{'preset'} || '?') . ' (' . $protocol . ')');
+
+	# Record the real codec/bitrate so the track info can display it accurately.
+	# Stash on the track object (read immediately by _makeMetadata) and in the
+	# shared cache keyed by track id (read on subsequent now-playing lookups).
+	my ($codec, $bitrate) = _presetQuality($chosen->{'preset'});
+	$json->{'sc_codec'} = $codec;
+	$json->{'sc_bitrate'} = $bitrate;
+	$cache->set('quality:' . $trackId, { codec => $codec, bitrate => $bitrate }, QUALITY_CACHE_TTL);
+
+	# 3. Resolve the signed CDN URL from the chosen transcoding.
+	my $mediaUrl = $chosen->{'url'};
+	my $sep = ($mediaUrl =~ /\?/) ? '&' : '?';
+	my $sigUrl = $mediaUrl . $sep . 'client_id=' . $clientId;
+	$sigUrl .= '&track_authorization=' . $trackAuth if $trackAuth;
+
+	$log->info('SoundCloud api-v2 call to ' . $sigUrl);
+	my $res2 = _apiV2Get($ua, $sigUrl);
+	if (!$res2->is_success) {
+		$log->warn('Transcoding resolution failed (' . $res2->status_line . '), falling back to v1');
+		return getStreamURLv1($json);
+	}
+
+	my $stream = eval { decode_json($res2->content) };
+	my $finalUrl = $stream && ref($stream) eq 'HASH' ? $stream->{'url'} : undef;
+	if (!$finalUrl) {
+		$log->warn('No url in transcoding response, falling back to v1');
+		return getStreamURLv1($json);
+	}
+
+	$log->info('Final URL that can be played: ' . $finalUrl);
+	$cache->set($cacheKey, $finalUrl, STREAM_CACHE_TTL);
+	return $finalUrl;
+}
+
+# Ordered list of preset name prefixes to look for, best first, for a given
+# quality preference. SoundCloud preset names look like mp3_0_0, opus_0_0,
+# aac_160k, aac_256k, abr_sq etc.
+sub _presetPreference {
+	my $quality = shift;
+
+	if ($quality eq 'mp3') {
+		# Force standard MP3, but still allow opus so something always plays.
+		return ('mp3', 'opus');
+	}
+	elsif ($quality eq 'aac') {
+		# Prefer the highest AAC tier, fall back to MP3 then opus.
+		return ('aac_256', 'aac_160', 'aac', 'mp3', 'opus');
+	}
+
+	# 'max' (default): highest quality first.
+	return ('aac_256', 'aac_160', 'aac', 'abr', 'mp3', 'opus');
+}
+
+# Map a SoundCloud preset name to a human readable (codec, bitrate) pair for
+# display in the track info. Bitrate is a string like '256kbps', or '' when the
+# preset does not imply a fixed bitrate.
+sub _presetQuality {
+	my $preset = shift || '';
+
+	return ('AAC', '256kbps') if index($preset, 'aac_256') == 0;
+	return ('AAC', '160kbps') if index($preset, 'aac_160') == 0;
+	return ('AAC', '')        if index($preset, 'aac') == 0;
+	return ('AAC', '')        if index($preset, 'abr') == 0;
+	return ('MP3', '128kbps') if index($preset, 'mp3') == 0;
+	return ('Opus', '64kbps') if index($preset, 'opus') == 0;
+
+	return ('', '');
+}
+
+# Pick the best available transcoding for the configured quality preference.
+sub _selectTranscoding {
+	my ($transcodings, $quality) = @_;
+
+	foreach my $token (_presetPreference($quality)) {
+		foreach my $t (@$transcodings) {
+			my $preset = $t->{'preset'} || '';
+			# The preference token is matched as a prefix of the preset name, so
+			# e.g. "aac" matches "aac_160k"/"aac_256k" and "aac_256" matches only
+			# the 256k tier.
+			return $t if index($preset, $token) == 0;
+		}
+	}
+
+	return;
+}
+
+# Legacy v1 stream resolution via the public API /streams endpoint. Retained as a
+# fallback for when the api-v2 browser flow is unavailable.
+sub getStreamURLv1 {
+	my $json = shift;
+	$log->debug('getStreamURLv1 started.');
 
 	my $ua = LWP::UserAgent->new(
 		requests_redirectable => [],

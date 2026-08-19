@@ -16,6 +16,7 @@ use Slim::Utils::Cache;
 use Slim::Utils::Strings qw(string cstring);
 use JSON::XS qw(decode_json);
 use Digest::SHA qw(sha256_base64);
+use LWP::UserAgent;
 
 my $log   = logger('plugin.squeezecloud');
 my $prefs = preferences('plugin.squeezecloud');
@@ -24,6 +25,14 @@ my $cache = Slim::Utils::Cache->new('squeezecloud');
 use constant CLIENT_ID => '112d35211af80d72c8ff470ab66400d8';
 use constant CLIENT_SECRET => 'fc63200fee37d02bc3216cfeffe5f5ae';
 use constant REDIRECT_URI => 'https%3A%2F%2Fdanielvijge.github.io%2FSqueezeCloud%2Fcallback.html';
+
+# The web client_id is not the same as the registered-app CLIENT_ID above. It is
+# the anonymous id the SoundCloud web player uses, and is required (together with
+# the account OAuth token and a per-track track_authorization) to resolve the high
+# quality api-v2 stream transcodings. It rotates from time to time, so it is scraped
+# from the website and cached. A user-supplied value (webClientId pref) takes priority.
+use constant WEB_CLIENT_ID_TTL => 86400; # cache a scraped web client_id for one day
+use constant WEB_CLIENT_ID_LENGTH => 32;
 
 sub isLoggedIn {
 	return(isRefreshTokenAvailable() || isApiKeyAvailable());
@@ -230,6 +239,104 @@ sub getAuthenticationHeaders {
 		$log->debug('Using OAuth 2.1 bearer token for authorization');
 		return 'Authorization' => 'Bearer ' . getAccessToken();
 	}
+}
+
+# Authentication headers for the unofficial api-v2 (browser) endpoints used for
+# high quality stream resolution.
+#
+# api-v2 only accepts a genuine web-session OAuth token (the kind the browser
+# uses). The registered-app token obtained through the normal login flow is NOT
+# such a token and is rejected with 403, so reusing it is pointless and just costs
+# an extra failed request per track. We therefore only send an Authorization
+# header when the user has supplied a browser-extracted token via the oauthToken
+# pref (needed to unlock their own Go+ / AAC 256 transcodings). Without it we make
+# an anonymous request, which still resolves public tracks up to AAC 160.
+sub getApiV2AuthenticationHeaders {
+	$log->debug('getApiV2AuthenticationHeaders started.');
+
+	my $manualToken = $prefs->get('oauthToken');
+	if ($manualToken && $manualToken ne '') {
+		# Accept both "OAuth xxxx" and a bare token when pasted from the browser.
+		$manualToken =~ s/^\s*OAuth\s+//i;
+		$manualToken =~ s/^\s+|\s+$//g;
+		$log->debug('Using manually configured api-v2 OAuth token');
+		return ('Authorization' => 'OAuth ' . $manualToken);
+	}
+
+	$log->debug('No manual api-v2 token configured; requesting anonymously');
+	return ();
+}
+
+# Returns a web client_id suitable for api-v2 stream resolution. Order of
+# preference: a user-configured value, a previously scraped+cached value, then a
+# freshly scraped value from the SoundCloud website.
+sub getWebClientId {
+	$log->debug('getWebClientId started.');
+
+	my $manual = $prefs->get('webClientId');
+	if ($manual && length($manual) == WEB_CLIENT_ID_LENGTH) {
+		$log->debug('Using manually configured web client_id');
+		return $manual;
+	}
+
+	my $cached = $cache->get('web_client_id');
+	if ($cached) {
+		$log->debug('Using cached web client_id');
+		return $cached;
+	}
+
+	my $clientId = _scrapeWebClientId();
+	if ($clientId) {
+		$log->info('Scraped web client_id from SoundCloud website');
+		$cache->set('web_client_id', $clientId, WEB_CLIENT_ID_TTL);
+	}
+	else {
+		$log->warn('Could not obtain a web client_id from the SoundCloud website');
+	}
+	return $clientId;
+}
+
+# Clear a cached (scraped) web client_id, e.g. after it has been rejected, so the
+# next resolution attempt scrapes a fresh one.
+sub clearWebClientId {
+	$log->debug('clearWebClientId started.');
+	$cache->remove('web_client_id');
+}
+
+# Scrape the anonymous web client_id used by the SoundCloud web player. The
+# homepage references a number of JavaScript bundles on sndcdn.com; one of them
+# contains a client_id:"..." assignment. This mirrors what the browser does.
+sub _scrapeWebClientId {
+	$log->debug('_scrapeWebClientId started.');
+
+	my $ua = LWP::UserAgent->new(
+		timeout => 15,
+		agent   => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0',
+	);
+
+	my $res = $ua->get('https://soundcloud.com/');
+	if (!$res->is_success) {
+		$log->warn('Failed to fetch SoundCloud homepage: ' . $res->status_line);
+		return;
+	}
+
+	# Collect the script bundle URLs. The client_id tends to live in one of the
+	# later bundles, so search them in reverse order.
+	my @scripts = $res->content =~ /<script[^>]+src="([^"]+\.js)"/g;
+	foreach my $src (reverse @scripts) {
+		next unless $src =~ /sndcdn\.com/;
+
+		my $js = $ua->get($src);
+		next unless $js->is_success;
+
+		# Match client_id:"..." / "client_id":"..." / client_id='...' etc.
+		if ($js->content =~ /client_id["']?\s*[:=]\s*["']([0-9a-zA-Z]{32})["']/) {
+			return $1;
+		}
+	}
+
+	$log->warn('No client_id found in any SoundCloud script bundle');
+	return;
 }
 
 # This function generates random strings of a given length

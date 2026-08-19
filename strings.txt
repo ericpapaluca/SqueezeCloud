@@ -130,6 +130,33 @@ PLUGIN_SQUEEZECLOUD_LIKED_PLAYLISTS
 PLUGIN_SQUEEZECLOUD_LIKED_TRACKS
 	EN	Liked tracks
 
+PLUGIN_SQUEEZECLOUD_QUALITY
+	EN	Stream quality
+
+PLUGIN_SQUEEZECLOUD_QUALITY_DESC
+	EN	High quality streams (AAC) use the SoundCloud web player flow. The highest tiers (up to 256kbps AAC) require a SoundCloud Go+ account; other accounts get the best quality available for the track.
+
+PLUGIN_SQUEEZECLOUD_QUALITY_MAX
+	EN	Highest available (recommended)
+
+PLUGIN_SQUEEZECLOUD_QUALITY_AAC
+	EN	Prefer AAC (high)
+
+PLUGIN_SQUEEZECLOUD_QUALITY_MP3
+	EN	MP3 (standard)
+
+PLUGIN_SQUEEZECLOUD_WEB_CLIENT_ID
+	EN	Web client_id (optional)
+
+PLUGIN_SQUEEZECLOUD_WEB_CLIENT_ID_DESC
+	EN	Leave empty for automatic detection. Only set this if high quality playback fails: paste the 32-character client_id used by the SoundCloud web player (from your browser's developer tools, Network tab).
+
+PLUGIN_SQUEEZECLOUD_OAUTH_TOKEN
+	EN	Web OAuth token (optional)
+
+PLUGIN_SQUEEZECLOUD_OAUTH_TOKEN_DESC
+	EN	Leave empty to reuse your login above. Only set this if high quality playback fails: paste the value of the Authorization "OAuth ..." header from your logged-in browser session.
+
 PLUGIN_SQUEEZECLOUD_NOTES
 	EN	Notes
 
