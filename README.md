@@ -77,8 +77,11 @@ This requires two extra credentials beyond the normal login:
   automatically from the SoundCloud website's JavaScript bundles and cached for a
   day. It is *not* the same as the registered-app client id, and it rotates from
   time to time (the plugin re-scrapes automatically if one is rejected).
-* An **OAuth token** — by default the plugin reuses the token from your existing
-  one-click login, sent in the `OAuth <token>` form api-v2 expects.
+* An **OAuth token** (optional) — public tracks resolve anonymously (up to AAC
+  160kbps) with just the client id, so no token is required for a quality bump
+  over the old MP3 128kbps path. To unlock your own **AAC 256kbps (Go+)**
+  transcodings you must paste a browser-extracted web-session token (see below);
+  the registered-app token from the normal login is not accepted by api-v2.
 
 ### Settings ###
 
@@ -88,8 +91,10 @@ Under _Settings_ > _Advanced_ > _SoundCloud_ you will find:
   `MP3 (standard quality)`.
 * **Web client ID** (optional) — paste a browser-extracted client id to override
   auto-scraping.
-* **OAuth token** (optional) — paste a browser-extracted token to override the
-  reused login token, e.g. if your account token is not accepted by api-v2.
+* **OAuth token** (optional) — paste a browser-extracted web-session token to
+  authenticate as yourself, required to unlock AAC 256kbps (Go+) streams. In a
+  logged-in browser, open DevTools → Network, filter for `api-v2`, and copy the
+  `Authorization` header value (e.g. `OAuth 2-xxxxx…`) from any request.
 
 The now-playing track info reflects the codec and bitrate that were actually
 resolved, rather than a fixed value.
@@ -115,9 +120,11 @@ authors** — this fork would not exist without their prior work.
 * **Minimal blast radius.** Only stream resolution was changed. Browsing, search,
   favourites and the OAuth login flow all remain on the v1 API exactly as
   upstream, so the surface area for regressions is small.
-* **Reuse the existing login.** No new login step was added. The plugin reuses the
-  token from the existing one-click OAuth login and auto-scrapes the web
-  `client_id`, so for most users high quality "just works" with no extra setup.
+* **Anonymous by default, no new login step.** The plugin auto-scrapes the web
+  `client_id` and resolves streams anonymously, so a quality bump to AAC 160kbps
+  "just works" with no extra setup. AAC 256kbps (Go+) additionally needs a
+  browser-extracted web-session token, pasted in Settings — the registered-app
+  login token is deliberately not sent to api-v2 because it is rejected there.
 * **Highest quality by default, but configurable.** The default is the best
   available transcoding, with a Settings toggle to force AAC or fall back to MP3.
 * **Manual overrides as an escape hatch.** If a reused account token is not

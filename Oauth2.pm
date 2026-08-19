@@ -242,10 +242,15 @@ sub getAuthenticationHeaders {
 }
 
 # Authentication headers for the unofficial api-v2 (browser) endpoints used for
-# high quality stream resolution. Unlike the public v1 API, api-v2 expects the
-# token in the "OAuth <token>" form that the web player uses. A user-supplied
-# oauthToken pref (a browser-extracted token) takes priority; otherwise the
-# account token obtained through the normal login flow is reused.
+# high quality stream resolution.
+#
+# api-v2 only accepts a genuine web-session OAuth token (the kind the browser
+# uses). The registered-app token obtained through the normal login flow is NOT
+# such a token and is rejected with 403, so reusing it is pointless and just costs
+# an extra failed request per track. We therefore only send an Authorization
+# header when the user has supplied a browser-extracted token via the oauthToken
+# pref (needed to unlock their own Go+ / AAC 256 transcodings). Without it we make
+# an anonymous request, which still resolves public tracks up to AAC 160.
 sub getApiV2AuthenticationHeaders {
 	$log->debug('getApiV2AuthenticationHeaders started.');
 
@@ -255,14 +260,11 @@ sub getApiV2AuthenticationHeaders {
 		$manualToken =~ s/^\s*OAuth\s+//i;
 		$manualToken =~ s/^\s+|\s+$//g;
 		$log->debug('Using manually configured api-v2 OAuth token');
-		return 'Authorization' => 'OAuth ' . $manualToken;
+		return ('Authorization' => 'OAuth ' . $manualToken);
 	}
 
-	if (isApiKeyAvailable()) {
-		return 'Authorization' => 'OAuth ' . $prefs->get('apiKey');
-	}
-
-	return 'Authorization' => 'OAuth ' . getAccessToken();
+	$log->debug('No manual api-v2 token configured; requesting anonymously');
+	return ();
 }
 
 # Returns a web client_id suitable for api-v2 stream resolution. Order of
