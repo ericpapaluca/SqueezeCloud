@@ -69,6 +69,28 @@ sub getSeekData {
 	return { timeOffset => $newtime };
 }
 
+# Perform an api-v2 GET request.
+#
+# api-v2 resolves public tracks with just the client_id in the query string. An
+# account token is only needed to unlock a user's own high quality (Go+)
+# transcodings, and a token api-v2 does not recognise (e.g. the registered-app
+# token from the normal login flow) is rejected outright with 401/403. So we send
+# the token when we have one, but if that is rejected we retry the request
+# anonymously before giving up, so public tracks still resolve.
+sub _apiV2Get {
+	my ($ua, $url) = @_;
+
+	my @authHeaders = Plugins::SqueezeCloud::Oauth2::getApiV2AuthenticationHeaders();
+	my $res = @authHeaders ? $ua->get($url, @authHeaders) : $ua->get($url);
+
+	if (!$res->is_success && @authHeaders && ($res->code == 401 || $res->code == 403)) {
+		$log->warn('api-v2 rejected the account token (' . $res->status_line . '), retrying anonymously');
+		$res = $ua->get($url);
+	}
+
+	return $res;
+}
+
 # Resolve a playable stream URL for a track.
 #
 # This replicates the SoundCloud web player ("browser") flow via the api-v2
@@ -115,10 +137,11 @@ sub getStreamURL {
 	# 1. Fetch the api-v2 track object (transcodings + track_authorization).
 	my $trackUrl = API_V2_BASE . '/tracks/' . $trackId . '?client_id=' . $clientId;
 	$log->info('SoundCloud api-v2 call to ' . $trackUrl);
-	my $res = $ua->get($trackUrl, Plugins::SqueezeCloud::Oauth2::getApiV2AuthenticationHeaders());
+	my $res = _apiV2Get($ua, $trackUrl);
 	if (!$res->is_success) {
 		$log->warn('api-v2 track fetch failed (' . $res->status_line . '), falling back to v1');
-		# A rejected client_id may have rotated; drop it so the next attempt re-scrapes.
+		# Even the anonymous attempt failed, so a rotated/invalid client_id is the
+		# likely cause; drop it so the next attempt re-scrapes a fresh one.
 		Plugins::SqueezeCloud::Oauth2::clearWebClientId() if $res->code == 401 || $res->code == 403;
 		return getStreamURLv1($json);
 	}
@@ -160,7 +183,7 @@ sub getStreamURL {
 	$sigUrl .= '&track_authorization=' . $trackAuth if $trackAuth;
 
 	$log->info('SoundCloud api-v2 call to ' . $sigUrl);
-	my $res2 = $ua->get($sigUrl, Plugins::SqueezeCloud::Oauth2::getApiV2AuthenticationHeaders());
+	my $res2 = _apiV2Get($ua, $sigUrl);
 	if (!$res2->is_success) {
 		$log->warn('Transcoding resolution failed (' . $res2->status_line . '), falling back to v1');
 		return getStreamURLv1($json);
