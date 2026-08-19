@@ -155,7 +155,19 @@ PLUGIN_SQUEEZECLOUD_OAUTH_TOKEN
 	EN	Web OAuth token (optional)
 
 PLUGIN_SQUEEZECLOUD_OAUTH_TOKEN_DESC
-	EN	Leave empty to reuse your login above. Only set this if high quality playback fails: paste the value of the Authorization "OAuth ..." header from your logged-in browser session.
+	EN	Needed only for AAC 256kbps (SoundCloud Go+). Paste the "OAuth 2-..." Authorization header from your logged-in browser session (see the README for step-by-step instructions). The token expires after a while; leave empty if you are not a Go+ subscriber.
+
+PLUGIN_SQUEEZECLOUD_TOKEN_STATUS_VALID
+	EN	Go+ token is valid — high quality (AAC 256kbps) is unlocked.
+
+PLUGIN_SQUEEZECLOUD_TOKEN_STATUS_EXPIRED
+	EN	Go+ token has expired or was rejected — playback has dropped back to AAC 160kbps. Paste a fresh token from your browser to restore 256kbps.
+
+PLUGIN_SQUEEZECLOUD_TOKEN_STATUS_UNKNOWN
+	EN	Go+ token not verified yet — it will be checked the next time a track is played.
+
+PLUGIN_SQUEEZECLOUD_TOKEN_EXPIRED_TOAST
+	EN	SoundCloud Go+ token expired — playing at AAC 160kbps. Refresh the token in Settings for 256kbps.
 
 PLUGIN_SQUEEZECLOUD_NOTES
 	EN	Notes

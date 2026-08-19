@@ -61,6 +61,19 @@ sub handler {
 		$params->{'pref_' . $name} = $prefs->get($name);
 	}
 
+	# Check the health of the Go+ api-v2 token so the page can report whether it is
+	# still valid or has expired. This is asynchronous, so re-enter the handler once
+	# with the result (guarded by scTokenChecked to run at most once per page load).
+	my $token = $prefs->get('oauthToken');
+	if ($token && $token ne '' && !$params->{scTokenChecked}) {
+		$params->{scTokenChecked} = 1;
+		Plugins::SqueezeCloud::Oauth2::validateApiV2Token(sub {
+			$class->handler($client, $params, $callback, @args);
+		});
+		return;
+	}
+	$params->{oauthTokenStatus} = Plugins::SqueezeCloud::Oauth2::getApiV2TokenStatus();
+
 	if ($params->{code} && $params->{code} ne '') {
 		$log->debug('Getting access token and refresh token from code');
 		Plugins::SqueezeCloud::Oauth2::getAuthorizationToken(\&handler, @_);

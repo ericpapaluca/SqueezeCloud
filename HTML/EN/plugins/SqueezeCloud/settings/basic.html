@@ -50,6 +50,13 @@
 
 	[% WRAPPER setting title="PLUGIN_SQUEEZECLOUD_OAUTH_TOKEN" desc="PLUGIN_SQUEEZECLOUD_OAUTH_TOKEN_DESC" %]
 	<input type="text" class="stdedit" name="pref_oauthToken" size="60" value="[% pref_oauthToken %]" />
+	[% IF oauthTokenStatus == 'valid' %]
+	<div class="prefDesc" style="color: #3c763d; font-weight: bold;">&#10004; [% "PLUGIN_SQUEEZECLOUD_TOKEN_STATUS_VALID" | string %]</div>
+	[% ELSIF oauthTokenStatus == 'expired' %]
+	<div class="prefDesc" style="color: #a94442; font-weight: bold;">&#9888; [% "PLUGIN_SQUEEZECLOUD_TOKEN_STATUS_EXPIRED" | string %]</div>
+	[% ELSIF oauthTokenStatus == 'unknown' %]
+	<div class="prefDesc">[% "PLUGIN_SQUEEZECLOUD_TOKEN_STATUS_UNKNOWN" | string %]</div>
+	[% END %]
 	[% END %]
 
 	[% WRAPPER setting title="PLUGIN_SQUEEZECLOUD_NOTES" %]

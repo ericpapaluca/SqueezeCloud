@@ -27,6 +27,7 @@ use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Errno;
 use Slim::Utils::Cache;
+use Slim::Utils::Strings qw(string);
 use Scalar::Util qw(blessed);
 use Plugins::SqueezeCloud::Oauth2;
 
@@ -78,17 +79,57 @@ sub getSeekData {
 # the token when we have one, but if that is rejected we retry the request
 # anonymously before giving up, so public tracks still resolve.
 sub _apiV2Get {
-	my ($ua, $url) = @_;
+	my ($ua, $url, $client) = @_;
 
 	my @authHeaders = Plugins::SqueezeCloud::Oauth2::getApiV2AuthenticationHeaders();
 	my $res = @authHeaders ? $ua->get($url, @authHeaders) : $ua->get($url);
 
-	if (!$res->is_success && @authHeaders && ($res->code == 401 || $res->code == 403)) {
-		$log->warn('api-v2 rejected the account token (' . $res->status_line . '), retrying anonymously');
-		$res = $ua->get($url);
+	# When we sent the configured Go+ token, track its health so both the settings
+	# page and the on-player notification stay accurate.
+	if (@authHeaders) {
+		if ($res->is_success) {
+			# The token was accepted; remember it's healthy and re-arm the toast.
+			Plugins::SqueezeCloud::Oauth2::setApiV2TokenStatus('valid');
+			$cache->remove('tokenExpiredNotified');
+		}
+		elsif ($res->code == 401 || $res->code == 403) {
+			$log->warn('api-v2 rejected the request with the configured token (' . $res->status_line . '), retrying anonymously');
+			my $anon = $ua->get($url);
+			# If the anonymous retry succeeds, the token (not the client_id) was the
+			# problem, so it has expired/been revoked — tell the user.
+			_notifyTokenExpired($client) if $anon->is_success;
+			$res = $anon;
+		}
 	}
 
 	return $res;
+}
+
+# Warn the user that their configured Go+ token was rejected by api-v2 and has
+# likely expired, so high quality has silently dropped back to AAC 160. Shows a
+# brief on-player toast (rate-limited to once an hour so it does not fire on every
+# track or seek) and records the expired status for the settings page.
+sub _notifyTokenExpired {
+	my $client = shift;
+
+	Plugins::SqueezeCloud::Oauth2::setApiV2TokenStatus('expired');
+
+	return if $cache->get('tokenExpiredNotified');
+	$cache->set('tokenExpiredNotified', 1, 3600);
+
+	my $msg = string('PLUGIN_SQUEEZECLOUD_TOKEN_EXPIRED_TOAST');
+	$log->warn($msg);
+
+	return unless blessed($client) && $client->can('showBriefly');
+
+	my $title = string('PLUGIN_SQUEEZECLOUD');
+	$client->showBriefly({
+		line => [ $title, $msg ],
+		jive => { type => 'popupplay', text => [ $title, $msg ] },
+	}, {
+		duration => 8,
+		scroll   => 1,
+	});
 }
 
 # Resolve a playable stream URL for a track.
@@ -103,7 +144,7 @@ sub _apiV2Get {
 # etc.) it falls back to the legacy v1 /streams behaviour so playback keeps
 # working.
 sub getStreamURL {
-	my $json = shift;
+	my ($json, $client) = @_;
 	$log->debug('getStreamURL started.');
 
 	# Determine the numeric track id from the v1 metadata object. api-v2 uses the
@@ -137,7 +178,7 @@ sub getStreamURL {
 	# 1. Fetch the api-v2 track object (transcodings + track_authorization).
 	my $trackUrl = API_V2_BASE . '/tracks/' . $trackId . '?client_id=' . $clientId;
 	$log->info('SoundCloud api-v2 call to ' . $trackUrl);
-	my $res = _apiV2Get($ua, $trackUrl);
+	my $res = _apiV2Get($ua, $trackUrl, $client);
 	if (!$res->is_success) {
 		$log->warn('api-v2 track fetch failed (' . $res->status_line . '), falling back to v1');
 		# Even the anonymous attempt failed, so a rotated/invalid client_id is the
@@ -183,7 +224,7 @@ sub getStreamURL {
 	$sigUrl .= '&track_authorization=' . $trackAuth if $trackAuth;
 
 	$log->info('SoundCloud api-v2 call to ' . $sigUrl);
-	my $res2 = _apiV2Get($ua, $sigUrl);
+	my $res2 = _apiV2Get($ua, $sigUrl, $client);
 	if (!$res2->is_success) {
 		$log->warn('Transcoding resolution failed (' . $res2->status_line . '), falling back to v1');
 		return getStreamURLv1($json);
@@ -329,7 +370,7 @@ sub formatOverride {
 
 	my $track = $song->pluginData();
 	if ($track && $track->{'uri'}) {
-		my $stream = getStreamURL($track);
+		my $stream = getStreamURL($track, $song->master());
 		$song->streamUrl($stream) if $stream;
 	}
 
@@ -374,7 +415,7 @@ sub gotNextTrack {
 	# Save metadata for this track
 	$song->pluginData( $track );
 
-	my $stream = getStreamURL($track);
+	my $stream = getStreamURL($track, $client);
 
 	if (!$stream) {
 		$http->params->{'errorCallback'}->( 'PLUGIN_SQUEEZECLOUD_STREAM_FAILED', $track->{error} );	

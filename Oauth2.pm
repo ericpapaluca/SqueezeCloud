@@ -34,6 +34,10 @@ use constant REDIRECT_URI => 'https%3A%2F%2Fdanielvijge.github.io%2FSqueezeCloud
 use constant WEB_CLIENT_ID_TTL => 86400; # cache a scraped web client_id for one day
 use constant WEB_CLIENT_ID_LENGTH => 32;
 
+# How long to remember the health of the configured api-v2 (Go+) token, so the
+# settings page can report it and playback can detect a fresh expiry.
+use constant TOKEN_STATUS_TTL => 86400 * 30;
+
 sub isLoggedIn {
 	return(isRefreshTokenAvailable() || isApiKeyAvailable());
 }
@@ -265,6 +269,78 @@ sub getApiV2AuthenticationHeaders {
 
 	$log->debug('No manual api-v2 token configured; requesting anonymously');
 	return ();
+}
+
+# Health of the manually-configured api-v2 (Go+) web-session token, as last
+# observed either by validateApiV2Token() or by a real stream-resolution request.
+# One of 'valid', 'expired', 'unknown' or 'none' (no token configured). Cached so
+# the settings page can display it and so playback can tell when a working token
+# has just started being rejected.
+sub setApiV2TokenStatus {
+	my $status = shift;
+	$cache->set('oauthTokenStatus', $status, TOKEN_STATUS_TTL);
+}
+
+sub getApiV2TokenStatus {
+	my $manualToken = $prefs->get('oauthToken');
+	return 'none' if !$manualToken || $manualToken eq '';
+	return $cache->get('oauthTokenStatus') || 'unknown';
+}
+
+# Validate the configured api-v2 (Go+) token by making the same authenticated
+# api-v2 request playback uses (GET /me). A live token returns 200; an expired or
+# revoked one returns 401/403. Updates the cached token status and invokes the
+# callback (no args) when done. Fully asynchronous, so it never blocks the server.
+sub validateApiV2Token {
+	my $cb = shift;
+	$log->debug('validateApiV2Token started.');
+
+	my $token = $prefs->get('oauthToken');
+	if (!$token || $token eq '') {
+		setApiV2TokenStatus('none');
+		$cb->() if $cb;
+		return;
+	}
+	$token =~ s/^\s*OAuth\s+//i;
+	$token =~ s/^\s+|\s+$//g;
+
+	my $clientId = getWebClientId();
+	if (!$clientId) {
+		$log->warn('Cannot validate api-v2 token without a web client_id');
+		setApiV2TokenStatus('unknown');
+		$cb->() if $cb;
+		return;
+	}
+
+	my $http = Slim::Networking::SimpleAsyncHTTP->new(
+		sub {
+			$log->info('api-v2 Go+ token validated successfully');
+			setApiV2TokenStatus('valid');
+			$cb->() if $cb;
+		},
+		sub {
+			my ($self, $error) = @_;
+			my $code = ($self && $self->{code}) || 0;
+			if ($code == 401 || $code == 403) {
+				$log->warn('api-v2 Go+ token rejected (' . ($error || $code) . '); it has likely expired');
+				setApiV2TokenStatus('expired');
+			}
+			else {
+				# Network/other error: do not claim the token expired.
+				$log->warn('Could not validate api-v2 Go+ token: ' . ($error || 'unknown error'));
+				setApiV2TokenStatus('unknown');
+			}
+			$cb->() if $cb;
+		},
+		{
+			timeout => 10,
+		}
+	);
+
+	$http->get(
+		'https://api-v2.soundcloud.com/me?client_id=' . $clientId,
+		'Authorization' => 'OAuth ' . $token,
+	);
 }
 
 # Returns a web client_id suitable for api-v2 stream resolution. Order of

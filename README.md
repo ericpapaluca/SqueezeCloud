@@ -138,6 +138,38 @@ Alternative: instead of the header, you can copy the `oauth_token` cookie value
 for `soundcloud.com` from the browser's Application/Storage tab — it is the same
 token.
 
+### When the token expires ###
+
+The token lasts weeks, but there is no refresh mechanism, so eventually it stops
+working and playback silently drops back to AAC 160kbps. The plugin makes this
+visible instead of leaving you guessing:
+
+* **In Settings** — the _SoundCloud_ settings page shows the token's health next to
+  the OAuth token field: *valid* (256kbps unlocked), *expired* (rejected — paste a
+  fresh one), or *not verified yet* (it is checked against api-v2 when the page
+  loads and after each save).
+* **On your player** — the first time a track is resolved after the token stops
+  working, a brief on-screen notification appears ("*SoundCloud Go+ token expired —
+  playing at AAC 160kbps. Refresh the token in Settings for 256kbps.*"). It is
+  rate-limited to once an hour so it never spams during a listening session, and it
+  re-arms automatically once a working token is configured again.
+
+When you see either signal, just repeat the steps above to paste a new token.
+
+### Why there is no automatic login ###
+
+An obvious wish is to have the plugin log in with your SoundCloud username and
+password and fetch the token itself. This was investigated and deliberately **not**
+implemented: SoundCloud's login is protected by DataDome and reCAPTCHA, which
+challenge automated clients. Empirically, even a real browser driven by automation
+is served a DataDome captcha the moment an email is submitted to
+`api-auth.soundcloud.com/web-auth/identifier` (it returns `403` and loads a captcha
+iframe). Getting past that would mean fingerprint-spoofing plus a captcha-solving
+service — a fragile arms race that breaks on every DataDome/reCAPTCHA update and
+strays into circumventing bot protection. The manual copy-paste token, whose
+session lasts for weeks, is the robust alternative — so the effort went into making
+its expiry obvious (above) rather than into brittle auto-login.
+
 ## How this fork was built ##
 
 The high quality support was ported with the help of [Claude Code](https://www.anthropic.com/claude-code).
@@ -171,6 +203,11 @@ authors** — this fork would not exist without their prior work.
   the fork is never *less* reliable than upstream.
 * **Honest metadata.** The displayed codec/bitrate is derived from the transcoding
   that was actually selected instead of being hardcoded.
+* **Visible token expiry, not silent downgrade.** Because the Go+ token expires
+  with no refresh path, the plugin reports its health in Settings and shows a brief
+  on-player notification when a working token starts being rejected — so a drop to
+  AAC 160 is diagnosable rather than mysterious. Automatic login was investigated
+  and rejected as infeasible (DataDome/reCAPTCHA); see the section above.
 * **No transcoding changes.** `ffmpeg`/`custom-convert.conf` already handle the
   HLS/AAC streams, so that layer was left untouched.
 
