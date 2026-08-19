@@ -181,12 +181,14 @@ sub _makeMetadata {
 	}
 
 	my ($codec, $bitrate) = _trackQuality($json);
+	my $durationMs = _trackDurationMs($json);
+	my $title = _decorateTitle($json);
 
 	my $DATA = {
 		urn => $json->{'urn'},
-		duration => $json->{'duration'} / 1000,
-		name => $json->{'title'},
-		title => $json->{'title'},
+		duration => $durationMs / 1000,
+		name => $title,
+		title => $title,
 		artist => _getArtist($json),
 		album => "SoundCloud",
 		play => "soundcloud://" . $json->{'urn'},
@@ -209,9 +211,9 @@ sub _makeMetadata {
 		my $duration = _formatDuration($json);
 		# line1 and line2 are used in browse view
 		# artist and title are used in the now playing and playlist views
-		$DATA->{'line1'} = $json->{'title'} . ' (' . $duration . ')';
+		$DATA->{'line1'} = $title . ' (' . $duration . ')';
 		$DATA->{'line2'} = $json->{'user'}->{'username'} . ( $year ? ' (' . $year . ')' : '');
-		$DATA->{'title'} = $json->{'title'} . ' (' . $duration . ')';
+		$DATA->{'title'} = $title . ' (' . $duration . ')';
 		$DATA->{'items'} = _advancedMenuItems($client, $json, 1);
 		$DATA->{'playall'} = 0;
 		$DATA->{'passthrough'} = [{
@@ -231,10 +233,49 @@ sub _makeMetadata {
 
 sub _formatDuration {
 	my ( $json ) = @_;
-	if ($json->{'duration'}) {
-		my $duration = $json->{'duration'} / 1000;
+	my $ms = _trackDurationMs($json);
+	if ($ms) {
+		my $duration = $ms / 1000;
 		return sprintf('%s:%02s', int($duration / 60), int($duration % 60));
 	}
+}
+
+# Duration of the track in milliseconds. Prefers the real (full) duration when we
+# know it: the api-v2 stream resolver stashes the authenticated duration on the
+# track (sc_duration_ms) for Go+ tracks whose v1 metadata only reports the 30s
+# snippet. Otherwise fall back to full_duration, then the plain (possibly snipped)
+# duration.
+sub _trackDurationMs {
+	my ( $json ) = @_;
+	return $json->{'sc_duration_ms'} if $json->{'sc_duration_ms'};
+
+	# The api-v2 stream resolver caches the authenticated full duration keyed by
+	# track id; use it when this metadata came from cache (no sc_duration_ms set).
+	my $id = $json->{'id'};
+	if ((!defined $id || $id eq '') && defined $json->{'urn'} && $json->{'urn'} =~ /(\d+)\s*$/) {
+		$id = $1;
+	}
+	if ($id) {
+		my $cached = $cache->get('duration:' . $id);
+		return $cached if $cached;
+	}
+
+	my $full = $json->{'full_duration'} || 0;
+	my $dur  = $json->{'duration'} || 0;
+	return $full > $dur ? $full : $dur;
+}
+
+# Mark Go+ (high-tier subscription) tracks in listings so the user can tell them
+# apart. These only play in full when a Go+ token is configured.
+sub _decorateTitle {
+	my ( $json ) = @_;
+	my $title = defined $json->{'title'} ? $json->{'title'} : '';
+	my $monet  = $json->{'monetization_model'} || '';
+	my $policy = $json->{'policy'} || '';
+	if ($monet eq 'SUB_HIGH_TIER' || $policy eq 'SNIP') {
+		$title .= ' [Go+]';
+	}
+	return $title;
 }
 
 sub _getYear {
@@ -512,15 +553,51 @@ sub fetchMetadata {
 	$log->debug('fetchMetadata ended.');
 }
 
+# Decide whether a track from a v1 listing should be shown.
+#
+# The v1 API marks Go+ (high-tier subscription) tracks as not streamable for
+# third-party apps, so the historic `streamable` filter hides them entirely. But
+# those tracks CAN be played in full through the api-v2 browser flow when a Go+
+# token is configured, so in that case we expose them too. Without a token they
+# would only resolve to a 30-second preview, so we keep hiding them by default.
+sub _isTrackExposable {
+	my $entry = shift;
+
+	return 1 if $entry->{'streamable'};
+
+	my $monet  = $entry->{'monetization_model'} || '';
+	my $policy = $entry->{'policy'} || '';
+	my $access = $entry->{'access'} || '';
+	my $looksGoPlus = ($monet eq 'SUB_HIGH_TIER' || $policy eq 'SNIP' || $access eq 'preview');
+
+	return ($looksGoPlus && Plugins::SqueezeCloud::Oauth2::hasGoPlusToken()) ? 1 : 0;
+}
+
+# Log the streaming-eligibility fields of a track and whether we kept it, so the
+# reasons Go+ tracks appear or disappear can be diagnosed from the plugin log.
+sub _logTrackEligibility {
+	my ($entry, $keep) = @_;
+	return unless $log->is_debug;
+	$log->debug(sprintf(
+		'track "%s" streamable=%s access=%s policy=%s monetization=%s -> %s',
+		$entry->{'title'} || '?',
+		defined $entry->{'streamable'} ? ($entry->{'streamable'} ? 1 : 0) : '-',
+		$entry->{'access'} || '-',
+		$entry->{'policy'} || '-',
+		$entry->{'monetization_model'} || '-',
+		$keep ? 'shown' : 'hidden',
+	));
+}
+
 sub _parseTracks {
 	$log->debug('_parseTracks started.');
 	my ($client, $json) = @_;
 	my $menuEntries = [];
 
 	for my $entry (@{$json->{'collection'}}) {
-		if ($entry->{'streamable'}) {
-			push @$menuEntries, _makeMetadata($client, $entry);
-		}
+		my $keep = _isTrackExposable($entry);
+		_logTrackEligibility($entry, $keep);
+		push @$menuEntries, _makeMetadata($client, $entry) if $keep;
 	}
 
 	return $menuEntries;
@@ -797,9 +874,9 @@ sub _parsePlaylistTracks {
 	$log->debug('sizesize: ' . scalar @{$json->{'tracks'}});
 
 	for my $entry (@{$json->{'tracks'}}) {
-		if ($entry->{'streamable'}) {
-			push @$menuEntries, _makeMetadata($client, $entry);
-		}
+		my $keep = _isTrackExposable($entry);
+		_logTrackEligibility($entry, $keep);
+		push @$menuEntries, _makeMetadata($client, $entry) if $keep;
 	}
 
 	return $menuEntries;

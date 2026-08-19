@@ -255,6 +255,15 @@ sub getAuthenticationHeaders {
 # header when the user has supplied a browser-extracted token via the oauthToken
 # pref (needed to unlock their own Go+ / AAC 256 transcodings). Without it we make
 # an anonymous request, which still resolves public tracks up to AAC 160.
+# True when the user has configured a Go+ web-session token, i.e. we can resolve
+# high-tier (Go+) tracks in full through the api-v2 browser flow. Used to decide
+# whether it is worth exposing Go+ tracks in browse/search results (without a token
+# they would only ever yield a 30-second preview).
+sub hasGoPlusToken {
+	my $manualToken = $prefs->get('oauthToken');
+	return ($manualToken && $manualToken ne '') ? 1 : 0;
+}
+
 sub getApiV2AuthenticationHeaders {
 	$log->debug('getApiV2AuthenticationHeaders started.');
 

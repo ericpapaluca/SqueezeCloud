@@ -193,6 +193,16 @@ sub getStreamURL {
 		return getStreamURLv1($json);
 	}
 
+	# Capture the authenticated duration. For Go+ tracks the v1 metadata only
+	# reports the 30-second snippet length, but api-v2 (authenticated with a Go+
+	# token) returns the full track, so record it on the shared track object and
+	# cache so the now-playing/browse duration is correct instead of cutting off.
+	my $realDurationMs = $track->{'full_duration'} || $track->{'duration'};
+	if ($realDurationMs) {
+		$json->{'sc_duration_ms'} = $realDurationMs;
+		$cache->set('duration:' . $trackId, $realDurationMs, QUALITY_CACHE_TTL);
+	}
+
 	my $trackAuth = $track->{'track_authorization'};
 	my $transcodings = $track->{'media'} && $track->{'media'}->{'transcodings'};
 	if (!$transcodings || ref($transcodings) ne 'ARRAY' || !@$transcodings) {
